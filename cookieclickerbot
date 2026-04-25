@@ -1,0 +1,551 @@
+import tkinter as tk        # Python's built-in GUI library
+import webbrowser           # Python's built-in library for opening URLs
+import winsound             # Windows-only library for playing sounds
+import pyautogui            # Library for controlling mouse and keyboard
+import keyboard             # Library for detecting keyboard presses
+import time                 # Library for delays and timing
+import threading            # Library for running code in background
+ 
+# Computer Vision imports (from Week 4)
+import cv2                  # OpenCV - required for 'confidence' parameter
+import os                   # For checking if reference images exist
+ 
+# NEW IMPORTS FOR LESSON 2 (Golden Cookie Detection)
+import numpy as np          # Required by OpenCV for array operations
+import mss                  # Fast screenshot library (~10ms vs ~100ms for PIL)
+ 
+ 
+# ===========================================================================
+# POSITION CONFIGURATION (from Module 1)
+# ===========================================================================
+ 
+BIG_COOKIE_X_POSITION = 300
+BIG_COOKIE_Y_POSITION = 500
+ 
+UPGRADE_X_POSITION = 1700
+UPGRADE_Y_POSITIONS = [500, 575, 625, 700, 775]
+UPGRADE_INTERVAL = 30
+ 
+ 
+# ===========================================================================
+# COMPUTER VISION CONFIGURATION (from Week 4)
+# ===========================================================================
+ 
+# Get the directory where this script is located
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+ 
+NOTIFICATION_X_IMAGE = os.path.join(SCRIPT_DIR, "notification_x.png")
+BIG_COOKIE_IMAGE = os.path.join(SCRIPT_DIR, "big_cookie.png")
+ 
+# Upgrade reference images
+UPGRADE_IMAGES = [
+    os.path.join(SCRIPT_DIR, "cursor.png"),
+    os.path.join(SCRIPT_DIR, "grandma.png"),
+    os.path.join(SCRIPT_DIR, "farm.png"),
+    os.path.join(SCRIPT_DIR, "mine.png"),
+    os.path.join(SCRIPT_DIR, "factory.png")
+]
+ 
+CV_CONFIDENCE = 0.8
+UPGRADE_CV_CONFIDENCE = 0.7
+NOTIFICATION_CHECK_INTERVAL = 2.0
+COOKIE_CV_UPDATE_INTERVAL = 5.0
+ 
+ 
+# ===========================================================================
+# GOLDEN COOKIE CONFIGURATION (NEW in Lesson 2)
+# ===========================================================================
+ 
+GOLDEN_COOKIE_IMAGE = os.path.join(SCRIPT_DIR, "golden_cookie.png")
+ 
+# Scales to check for golden cookies (they spawn at different sizes)
+SCALES = [0.1, 0.25, 0.5, 0.75, 1.0, 1.25, 1.5]
+ 
+# Rotations to check in degrees (golden cookies can be slightly tilted)
+ROTATIONS = [-10, 0, 10]
+ 
+# How closely the golden cookie must match (lower = more forgiving)
+GOLDEN_COOKIE_THRESHOLD = 0.5
+ 
+# Pre-computed scaled templates: {path: [(scale, rotation, width, height, img), ...]}
+scaled_templates = {}
+ 
+ 
+# ===========================================================================
+# GLOBAL STATE
+# ===========================================================================
+ 
+should_click_cookies = False
+click_count = 0
+notifications_closed = 0
+cookie_detected_by_cv = False
+current_cookie_x = BIG_COOKIE_X_POSITION
+current_cookie_y = BIG_COOKIE_Y_POSITION
+current_upgrade_positions = [None] * len(UPGRADE_IMAGES)
+upgrades_detected_by_cv = False
+ 
+# NEW: Golden cookie tracking (Lesson 2)
+golden_cookies_clicked = 0
+last_golden_pos = (0, 0)  # Track last click to avoid duplicates
+detecting = False          # Flag to control golden cookie detection thread
+ 
+ 
+# ===========================================================================
+# COMPUTER VISION FUNCTIONS (from Week 4)
+# ===========================================================================
+ 
+def detect_image_on_screen(image_path, confidence=0.8):
+    """Use OpenCV to find an image on the screen."""
+    try:
+        center = pyautogui.locateCenterOnScreen(image_path, confidence=confidence)
+        if center:
+            return (center.x, center.y)
+        return None
+    except pyautogui.ImageNotFoundException:
+        return None
+    except Exception as e:
+        print(f"[CV Error] {e}")
+        return None
+ 
+ 
+def detect_big_cookie():
+    """Try to find the big cookie on screen using CV."""
+    if not os.path.exists(BIG_COOKIE_IMAGE):
+        return None
+    return detect_image_on_screen(BIG_COOKIE_IMAGE, CV_CONFIDENCE)
+ 
+ 
+def detect_notification_x():
+    """Try to find the notification X button on screen using CV."""
+    if not os.path.exists(NOTIFICATION_X_IMAGE):
+        return None
+    return detect_image_on_screen(NOTIFICATION_X_IMAGE, CV_CONFIDENCE)
+ 
+ 
+def close_notification():
+    """Check for notification popup and close it if found."""
+    global notifications_closed
+ 
+    location = detect_notification_x()
+    if location:
+        x, y = location
+        print(f"[CV] Found notification at ({x}, {y}) - closing!")
+        pyautogui.click(x, y)
+        notifications_closed += 1
+        time.sleep(0.2)
+        return True
+    return False
+ 
+ 
+def detect_upgrade(image_path):
+    """Try to find an upgrade icon on screen using CV."""
+    if not os.path.exists(image_path):
+        return None
+    return detect_image_on_screen(image_path, UPGRADE_CV_CONFIDENCE)
+ 
+ 
+def detect_all_upgrades():
+    """Scan for all upgrade icons and return their positions."""
+    global current_upgrade_positions, upgrades_detected_by_cv
+ 
+    positions = []
+    found_count = 0
+ 
+    for i, image_path in enumerate(UPGRADE_IMAGES):
+        location = detect_upgrade(image_path)
+        positions.append(location)
+        if location:
+            found_count += 1
+ 
+    current_upgrade_positions = positions
+    upgrades_detected_by_cv = found_count > 0
+ 
+    return positions
+ 
+ 
+def cookie_cv_monitor():
+    """Background thread that updates cookie position using CV."""
+    global should_click_cookies, cookie_detected_by_cv
+    global current_cookie_x, current_cookie_y
+ 
+    print("[CV Thread] Started - monitoring cookie position every 5 seconds")
+ 
+    while should_click_cookies:
+        location = detect_big_cookie()
+ 
+        if location:
+            current_cookie_x, current_cookie_y = location
+            cookie_detected_by_cv = True
+            cv_status_label.config(
+                text=f"Cookie: CV DETECTED ({location[0]}, {location[1]})",
+                fg="green"
+            )
+        else:
+            # Cookie not found by CV - use fallback position
+            cookie_detected_by_cv = False
+            current_cookie_x = BIG_COOKIE_X_POSITION
+            current_cookie_y = BIG_COOKIE_Y_POSITION
+            cv_status_label.config(text="Cookie: Using fallback", fg="orange")
+ 
+        time.sleep(COOKIE_CV_UPDATE_INTERVAL)
+ 
+    print("[CV Thread] Stopped")
+ 
+ 
+# ===========================================================================
+# GOLDEN COOKIE DETECTION FUNCTIONS (NEW in Lesson 2)
+# ===========================================================================
+ 
+def rotate_image(img, angle):
+    """Rotate image by angle degrees around center."""
+    h, w = img.shape[:2]
+    center = (w // 2, h // 2)
+    matrix = cv2.getRotationMatrix2D(center, angle, 1.0)
+    rotated = cv2.warpAffine(img, matrix, (w, h), borderMode=cv2.BORDER_REPLICATE)
+    return rotated
+ 
+ 
+def precompute_templates(template_path):
+    """Pre-generate all scaled and rotated versions of a template at startup."""
+    if template_path in scaled_templates:
+        return scaled_templates[template_path]
+ 
+    if not os.path.exists(template_path):
+        return None
+ 
+    img = cv2.imread(template_path)
+    if img is None:
+        return None
+ 
+    template_gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+ 
+    # Pre-compute all scaled + rotated versions
+    templates = []
+    for scale in SCALES:
+        for rotation in ROTATIONS:
+            # Scale is divided by 3 because screen is downsampled to 33%
+            width = int(template_gray.shape[1] * scale / 3)
+            height = int(template_gray.shape[0] * scale / 3)
+            if width >= 10 and height >= 10:
+                resized = cv2.resize(template_gray, (width, height))
+                rotated = rotate_image(resized, rotation)
+                templates.append((scale, rotation, width, height, rotated))
+ 
+    scaled_templates[template_path] = templates
+    print(f"Pre-computed {len(templates)} golden cookie templates ({len(SCALES)} scales x {len(ROTATIONS)} rotations)")
+    return templates
+ 
+ 
+def fast_screenshot_gray():
+    """Take screenshot directly to grayscale using mss, downsampled 33% for speed."""
+    with mss.mss() as sct:  # Create per-call (thread-safe)
+        monitor = sct.monitors[1]  # Primary monitor
+        img = np.array(sct.grab(monitor))
+        gray = cv2.cvtColor(img, cv2.COLOR_BGRA2GRAY)
+        # Downsample to 33% - matching is 9x faster on smaller image
+        h, w = gray.shape
+        return cv2.resize(gray, (w // 3, h // 3))
+ 
+ 
+def find_image_multiscale(template_path, threshold=0.6):
+    """Find an image on screen at multiple scales and rotations using OpenCV."""
+    # Get pre-computed scaled + rotated templates
+    templates = precompute_templates(template_path)
+    if not templates:
+        return None
+ 
+    # Fast screenshot directly to grayscale
+    screen_gray = fast_screenshot_gray()
+    screen_h, screen_w = screen_gray.shape
+ 
+    best_match = None
+    best_val = 0
+ 
+    # Check all pre-computed scales and rotations
+    for scale, rotation, width, height, rotated in templates:
+        # Skip if template is larger than screen
+        if height > screen_h or width > screen_w:
+            continue
+ 
+        # Template matching
+        result = cv2.matchTemplate(screen_gray, rotated, cv2.TM_CCOEFF_NORMED)
+        min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(result)
+ 
+        if max_val > best_val and max_val >= threshold:
+            best_val = max_val
+            # Calculate center point (multiply by 3 to convert back to full screen coords)
+            center_x = (max_loc[0] + width // 2) * 3
+            center_y = (max_loc[1] + height // 2) * 3
+            best_match = (center_x, center_y, max_val, scale, rotation)
+ 
+            # Early termination - good enough match found
+            if max_val > 0.7:
+                return best_match
+ 
+    return best_match
+ 
+ 
+def detect_golden_cookies():
+    """Background thread that scans for golden cookies."""
+    global detecting, golden_cookies_clicked, last_golden_pos
+ 
+    print("[Golden] Detection thread started (multi-scale)...")
+ 
+    while detecting:
+        try:
+            result = find_image_multiscale(GOLDEN_COOKIE_IMAGE, GOLDEN_COOKIE_THRESHOLD)
+ 
+            if result:
+                x, y, confidence, scale, rotation = result
+                # Only click if position is different from last click (50px tolerance)
+                dist = ((x - last_golden_pos[0])**2 + (y - last_golden_pos[1])**2)**0.5
+                if dist > 50:
+                    print(f"[Golden] Found at ({x}, {y}) conf={confidence:.2f} scale={scale:.1f}x rot={rotation}")
+                    pyautogui.click(x, y)
+                    last_golden_pos = (x, y)
+                    golden_cookies_clicked += 1
+                    print(f"[Golden] Cookie #{golden_cookies_clicked} clicked!")
+                    time.sleep(0.5)  # Brief pause after clicking to avoid double-clicks
+ 
+            # No sleep needed - detection is fast enough (~130ms per cycle)
+ 
+        except Exception as e:
+            print(f"[Golden] Detection error: {e}")
+            time.sleep(1)
+ 
+    print("[Golden] Detection thread stopped.")
+ 
+ 
+# ===========================================================================
+ 
+def run_cookie_bot():
+    """Main bot loop."""
+    global should_click_cookies, click_count, detecting
+ 
+    print("Starting in 5 seconds... get Cookie Clicker ready!")
+    time.sleep(5)
+ 
+    print(f"Clicking! Upgrades every {UPGRADE_INTERVAL}s. Press ESC to stop.")
+ 
+    # Start the CV monitoring thread for big cookie position
+    cv_thread = threading.Thread(target=cookie_cv_monitor, daemon=True)
+    cv_thread.start()
+ 
+    # NEW: Start golden cookie detection thread (Lesson 2)
+    detecting = True
+    golden_thread = threading.Thread(target=detect_golden_cookies, daemon=True)
+    golden_thread.start()
+ 
+    last_upgrade_time = time.time()
+    last_notification_check = time.time()
+ 
+    while should_click_cookies:
+        current_time = time.time()
+ 
+        pyautogui.click(current_cookie_x, current_cookie_y)
+        click_count += 1
+ 
+        if current_time - last_notification_check >= NOTIFICATION_CHECK_INTERVAL:
+            if close_notification():
+                notif_count_label.config(text=f"Notifications closed: {notifications_closed}")
+            last_notification_check = current_time
+ 
+        if current_time - last_upgrade_time >= UPGRADE_INTERVAL:
+            click_all_upgrades()
+            last_upgrade_time = current_time
+ 
+    # Stop golden cookie detection when clicking stops
+    detecting = False
+ 
+    print(f"Bot stopped. Clicks: {click_count}, Notifications closed: {notifications_closed}, Golden cookies clicked: {golden_cookies_clicked}")
+ 
+ 
+def start_clicking_cookies():
+    """Start the cookie bot in a background thread."""
+    global should_click_cookies
+ 
+    if should_click_cookies:
+        print("Bot is already running!")
+        return
+ 
+    should_click_cookies = True
+    bot_thread = threading.Thread(target=run_cookie_bot, daemon=True)
+    bot_thread.start()
+ 
+ 
+def stop_clicking_cookies():
+    """Stop the cookie bot."""
+    global should_click_cookies, detecting
+    should_click_cookies = False
+    detecting = False
+    cv_status_label.config(text="Cookie: Stopped", fg="gray")
+    print("Stopped!")
+ 
+ 
+def click_all_upgrades():
+    """Click upgrades using CV detection, with fallback to hardcoded positions."""
+    global upgrades_detected_by_cv
+ 
+    print("Buying upgrades...")
+    detected_positions = detect_all_upgrades()
+ 
+    cv_clicks = 0
+    fallback_clicks = 0
+ 
+    for i, cv_position in enumerate(detected_positions):
+        if cv_position:
+            pyautogui.click(cv_position[0], cv_position[1])
+            cv_clicks += 1
+        elif i < len(UPGRADE_Y_POSITIONS):
+            pyautogui.click(UPGRADE_X_POSITION, UPGRADE_Y_POSITIONS[i])
+            fallback_clicks += 1
+        time.sleep(0.1)
+ 
+    if cv_clicks > 0:
+        upgrade_status_label.config(
+            text=f"Upgrades: {cv_clicks} CV, {fallback_clicks} fallback",
+            fg="green" if fallback_clicks == 0 else "orange"
+        )
+    else:
+        upgrade_status_label.config(text="Upgrades: Using fallback", fg="orange")
+ 
+ 
+def play_sound():
+    winsound.PlaySound("SystemExclamation", winsound.SND_ALIAS)
+ 
+def open_game():
+    webbrowser.open("https://orteil.dashnet.org/cookieclicker/")
+ 
+def monitor_mouse_position():
+    x, y = pyautogui.position()
+    position_label.config(text=f"Mouse: ({x}, {y})")
+    root.after(100, monitor_mouse_position)
+ 
+def update_click_count_display():
+    click_count_label.config(text=f"Clicks: {click_count}")
+    golden_label.config(text=f"Golden Cookies: {golden_cookies_clicked}")
+    root.after(100, update_click_count_display)
+ 
+def test_cv_detection():
+    """Quick test of CV detection."""
+    print("\nTesting CV detection...")
+ 
+    cookie = detect_big_cookie()
+    if cookie:
+        print(f"  Big Cookie: FOUND at ({cookie[0]}, {cookie[1]})")
+        cv_status_label.config(text=f"Cookie: FOUND ({cookie[0]}, {cookie[1]})", fg="green")
+    else:
+        print("  Big Cookie: NOT FOUND")
+        cv_status_label.config(text="Cookie: NOT FOUND", fg="red")
+ 
+    notif = detect_notification_x()
+    if notif:
+        print(f"  Notification X: FOUND at ({notif[0]}, {notif[1]})")
+    else:
+        print("  Notification X: not visible")
+ 
+    # Test upgrade detection
+    print("\n  --- Upgrade Detection ---")
+    upgrade_names = ["Cursor", "Grandma", "Farm", "Mine", "Factory"]
+    found_count = 0
+    for i, image_path in enumerate(UPGRADE_IMAGES):
+        name = upgrade_names[i] if i < len(upgrade_names) else f"Upgrade {i+1}"
+        if os.path.exists(image_path):
+            location = detect_upgrade(image_path)
+            if location:
+                print(f"  {name}: FOUND at ({location[0]}, {location[1]})")
+                found_count += 1
+            else:
+                print(f"  {name}: not visible")
+        else:
+            print(f"  {name}: IMAGE MISSING ({image_path})")
+ 
+    if found_count > 0:
+        upgrade_status_label.config(text=f"Upgrades: {found_count}/{len(UPGRADE_IMAGES)} detected", fg="green")
+    else:
+        upgrade_status_label.config(text="Upgrades: None detected (using fallback)", fg="orange")
+        # NEW: Test golden cookie detection (Lesson 2)
+    print("\n  --- Golden Cookie Detection ---")
+    if os.path.exists(GOLDEN_COOKIE_IMAGE):
+        start = time.perf_counter()
+        golden = find_image_multiscale(GOLDEN_COOKIE_IMAGE, GOLDEN_COOKIE_THRESHOLD)
+        elapsed_ms = (time.perf_counter() - start) * 1000
+        if golden:
+            print(f"  Golden Cookie: FOUND at ({golden[0]}, {golden[1]}) conf={golden[2]:.2f} ({elapsed_ms:.0f}ms)")
+        else:
+            print(f"  Golden Cookie: not visible ({elapsed_ms:.0f}ms)")
+    else:
+        print("  Golden Cookie: IMAGE MISSING")
+ 
+def check_reference_images():
+    """Check if reference images exist."""
+    cookie_exists = os.path.exists(BIG_COOKIE_IMAGE)
+    notif_exists = os.path.exists(NOTIFICATION_X_IMAGE)
+    upgrade_count = sum(1 for img in UPGRADE_IMAGES if os.path.exists(img))
+    golden_exists = os.path.exists(GOLDEN_COOKIE_IMAGE)
+
+    status = []
+    status.append(f"Cookie: {'OK' if cookie_exists else 'MISSING'}")
+    status.append(f"Notif: {'OK' if notif_exists else 'MISSING'}")
+    status.append(f"Upgrades: {upgrade_count}/{len(UPGRADE_IMAGES)}")
+    status.append(f"Golden: {'OK' if golden_exists else 'MISSING'}")
+    ref_images_label.config(text=f"Ref images: {', '.join(status)}")
+    
+# ===========================================================================
+# GUI SETUP
+# ===========================================================================
+ 
+root = tk.Tk()
+root.title("Cookie Clicker Bot - Lesson 2: Golden Cookies")
+root.geometry("800x800")
+ 
+# Title
+tk.Label(root, text="Cookie Clicker Bot", font=("Arial", 16, "bold")).pack(pady=5)
+tk.Label(root, text="Lesson 2: Golden Cookie Detection", font=("Arial", 10), fg="gray").pack()
+ 
+tk.Label(root, text="").pack()
+ 
+# Buttons
+tk.Button(root, text="Play Sound", command=play_sound).pack(pady=5)
+tk.Button(root, text="Open Cookie Clicker", command=open_game).pack(pady=5)
+test_cv_btn = tk.Button(root, text="Test CV Detection", command=test_cv_detection, bg="lightblue")
+test_cv_btn.pack(pady=5)
+tk.Button(root, text="Start Clicking Cookies", command=start_clicking_cookies, bg="lightgreen").pack(pady=5)
+tk.Button(root, text="Stop (or press ESC)", command=stop_clicking_cookies).pack(pady=5)
+ 
+tk.Label(root, text="").pack()
+ 
+# Status displays
+position_label = tk.Label(root, text="Mouse: (0, 0)", font=("Courier", 12))
+position_label.pack(pady=5)
+ 
+click_count_label = tk.Label(root, text="Clicks: 0", font=("Courier", 12))
+click_count_label.pack(pady=5)
+ 
+# NEW: Golden cookie counter (Lesson 2)
+golden_label = tk.Label(root, text="Golden Cookies: 0", font=("Courier", 12), fg="goldenrod")
+golden_label.pack(pady=5)
+ 
+cv_status_label = tk.Label(root, text="Cookie: Not checked", font=("Courier", 10), fg="gray")
+cv_status_label.pack(pady=5)
+ 
+upgrade_status_label = tk.Label(root, text="Upgrades: Not checked", font=("Courier", 10), fg="gray")
+upgrade_status_label.pack(pady=2)
+ 
+ref_images_label = tk.Label(root, text="Ref images: Checking...", font=("Courier", 10), fg="gray")
+ref_images_label.pack(pady=2)
+ 
+notif_count_label = tk.Label(root, text="Notifications closed: 0", font=("Courier", 10))
+notif_count_label.pack(pady=5)
+ 
+# ===========================================================================
+ 
+monitor_mouse_position()
+update_click_count_display()
+root.after(100, check_reference_images)
+# NEW: Pre-compute golden cookie templates at startup (Lesson 2)
+if os.path.exists(GOLDEN_COOKIE_IMAGE):
+    precompute_templates(GOLDEN_COOKIE_IMAGE)
+
+keyboard.add_hotkey("esc", stop_clicking_cookies)
+root.mainloop()
